@@ -1,0 +1,285 @@
+---
+layout: post
+title:  以太坊RPC源码分析-JSON CODER-小猪佩奇版【1】
+subtitle: 可以针对源码对指定需求进行修改
+date: 2018-06-16
+author: Tianyun Chen (OFBank)
+header-img: img/blockchain.jpg
+catalog: true
+tags:
+   - Blog
+   - Block Chain
+   - 区块链
+   - RPC
+   - 以太坊
+---
+### 前言
+
+好久没有写技术博客了，最近好忙好忙好忙。突然间，感慨网上有很多以太坊源码分析的文章，全部都是pai ji 一口气把每行代码的注释放上去。其实以太坊代码的注释，我个人觉得很清晰了。对于一些新人来说，加了注释还是不能帮助他们快速理解。所以我尝试着把以太坊的代码重新写一遍，巩固自己对以太坊代码的理解，顺便写一篇博客帮助帮助新人也是挺好的。
+![enter description here][1]
+
+
+  
+## RPC介绍
+  
+
+#### 1. 什么是RPC
+
+ 来，先拉一段百度的解释 RPC（Remote Procedure Call）—远程过程调用，它是一种通过网络从远程计算机程序上请求服务，而不需要了解底层网络技术的协议。RPC协议假定某些传输协议的存在，如TCP或UDP，为通信程序之间携带信息数据。在OSI网络通信模型中，RPC跨越了传输层和应用层。RPC使得开发包括网络分布式多程序在内的应用程序更加容易。
+RPC采用客户机/服务器模式。请求程序就是一个客户机，而服务提供程序就是一个服务器。首先，客户机调用进程发送一个有进程参数的调用信息到服务进程，然后等待应答信息。在服务器端，进程保持睡眠状态直到调用信息到达为止。当一个调用信息到达，服务器获得进程参数，计算结果，发送答复信息，然后等待下一个调用信emphasized text息，最后，客户端调用进程接收答复信息，获得进程结果，然后调用执行继续进行。
+有多种 RPC模式和执行。最初由 Sun 公司提出。IETF ONC 宪章重新修订了 Sun 版本，使得 ONC RPC 协议成为 IETF 标准协议。现在使用最普遍的模式和执行是开放式软件基础的分布式计算环境（DCE）。
+ 一般人去看百度的技术类的解释一般都是这样的
+
+![enter description here][2]
+
+**简单的说，RPC就是A，B二台机器，A需要调用B机器上的某个方法，就感觉调用本地的方法一毛一样。RPC对于用户来说十分友好，RPC把需要调用的方法，参数序列化，通过TCP/UDP协议传输给对方，对方反序列化找到需要调用的方法和参数，然后把返回值序列化返回。有小好伙伴问，RPC和HTTP的区别，RPC比HTTP更浪，HTTP还需要穿衣服和脱衣服呢**
+
+#### 2. 以太坊中的RPC（Geth）
+
+以太坊中的有好很多RPC使用的场景，比如说 服务器需要调用钱包的服务，终端的JS命令行app跟GO的交互等等等等，但是以太坊中的RPC是基于http协议的和Json序列化方式实现的（jsonrpc），所以从传输效率上并没有很大的改善，但是我个人感觉这么做是为了代码规范化可读性，不然就要写几十个接口了。
+
+## 以太坊RPC分析[1]-JSON CODER
+
+#### 1. 应用场景
+
+我主要拿以太坊的**Inproc** 来分析，也就是用于程序内部调用的。简单的来看下个实例
+
+![enter description here][3]
+
+拿了一个我们of的测试版本，启动的了console模式，也就是命令行模式创建了一个钱包。可以看出，命令行的操作全部都是js的操作，由JS调用背后的GO 然后 通过RPC的方式传输给RPC Server等待输入的通道，最后处理 通道返回，JS在处理返回结果显示。中间一部分JS 调用GO这篇文章里 不做分析了，也是个大工程 有兴趣的小伙伴可以去看Web3.js的内容，小编有时间也整理一份手把手写web3.js的分析。 这里可以给大家提供一个 进入命令行的入口，方便大家去追溯代码
+cmd/geth/consolecmd.go (不要吐槽我拿龙猫当背景哈)
+ ![enter description here][4]
+
+
+#### 2. RPC结构分析
+![enter description here][5]
+从结构中比较重要的几个就是，client，server，json 组成了 RPC最重要的部分，client端用于发送请求，server 用于接受请求，而json 是jsonrpc的解析器（不知道用解析器合不合适，反正就是decoder和encoder），最后几个utils，error，subscription 都是用来辅助rpc 运行的，inproc是用于建立 程序内的交互，http用于http的交互，其它就不用多说了。基本把三大块都走一遍，大家都可以照葫芦画瓢来写自己需要的rpc。当然了网上有很多rpc开源的框架。有时候自己写一遍比用开源更有意思呢
+![enter description here][6]
+
+####  3. RPC代码开搞
+##### 3.1 Json.go
+```
+我个人觉得，先要从解析器来写呀，不然 请求过来怎么解析呢。所以我先拿Json.go，既然是jsonrpc，我们先看下jsonrpc的输入和输出格式
+
+--> {"jsonrpc": "2.0", "method": "ofbank_show", "params": ["0xfffffffffffffffffffffffffffff","laest"], "id": 1}
+<-- {"jsonrpc": "2.0", "result": "88888.888", "id": 1}
+
+格式还是比较简单的，jsonrpc的版本号，需要调用的方法（调用的对象和方法），传入的参数，请求的id（返回的id和请求id 匹配）
+我们拿到json 字符串，需要解析，找到对应的方法，用反射调用方法，最后获取返回值，封装，返回。
+```
+```
+变量：
+
+首先，良好的编程习惯，把需要的变量准备好
+const (
+ 	jsonrpcVersion           = "3.0"        //json 版本号
+	serviceMethodSeparator   = "_"  //json方法与对象的分隔符，就是method里面的“_”
+	subscribeMethodSuffix    = "_subscribe" //区别于普通方法，订阅某个消息
+	unsubscribeMethodSuffix  = "_unsubscribe" //取消订阅
+	notificationMethodSuffix = "_subscription"  //通知方法的前缀
+)
+
+//Json 请求结构体用于解析
+type jsonRequest struct {
+	Method  string          `json:"method"` 
+	Version string          `json:"jsonrpc"`
+	Id      json.RawMessage `json:"id,omitempty"`
+	Payload json.RawMessage `json:"params,omitempty"`  //Playload 属于参数，由于参数不确定可以直接把参数进行二进制编码，jsonRawMessage 其实就是对byte数组进一部封装
+}
+
+//同理
+type jsonSuccessResponse struct {
+	Version string      `json:"jsonrpc"`
+	Id      interface{} `json:"id,omitempty"`
+	Result  interface{} `json:"result"`
+}
+
+type jsonError struct {
+	Code    int         `json:"code"`
+	Message string      `json:"message"`
+	Data    interface{} `json:"data,omitempty"`
+}
+
+type jsonErrResponse struct {
+	Version string      `json:"jsonrpc"`
+	Id      interface{} `json:"id,omitempty"`
+	Error   jsonError   `json:"error"`
+}
+
+```
+```
+json编译器结构体（可以理解成是一个对象，对golang不熟悉的可以看下golang的OOP）
+type jsonCodec struct {
+	closer sync.Once          //  once 对象只会执行一次
+	closed chan interface{}   // 关闭等到通道
+	decMu  sync.Mutex         // decoder的锁呗 互斥锁
+	d      *json.Decoder      // json decoer 解析过来的请求
+	encMu  sync.Mutex         // encoder的锁
+	e      *json.Encoder      // json encoder 打包返回请求
+	rw     io.ReadWriteCloser // io的流（包括了读写关闭）
+}
+```
+```
+方法实现：
+//第一步当然是对象初始化
+func NewJSONCodec(rwc io.ReadWriteCloser) ServerCodec {
+  //传进来的流操作可以有很多种，可以是网络，可以是文件，可以是一个byte的流操作。。
+	d := json.NewDecoder(rwc)
+	return &jsonCodec{closed: make(chan interface{}), d: d, e: json.NewEncoder(rwc), rw: rwc}
+}
+
+//接受过来的信息
+func (c *jsonCodec) ReadRequestHeaders() ([]rpcRequest, bool, Error) {
+    //加个小锁保证线程安全
+	c.decMu.Lock()
+	defer c.decMu.Unlock()
+
+	var incomingMsg json.RawMessage
+	//解析过来的信息，好了信息哪里来呢？还记得最开始的decode 里面传入了一个流操作吗？？？就是从这个流里面拿的，会一直等待新的流进入哈
+	if err := c.d.Decode(&incomingMsg); err != nil {
+		return nil, false, &invalidRequestError{err.Error()}
+	}
+    //判断是不是批量操作
+	if isBatch(incomingMsg) {
+		return parseBatchRequest(incomingMsg)
+	}
+   //最终解析的真正实现
+	return parseRequest(incomingMsg)
+}
+
+//解析过来的信息
+func parseRequest(incomingMsg json.RawMessage) ([]rpcRequest, bool, Error) {
+	var in jsonRequest	
+    //go自带的json解析，golang的json 解析基于 对象，map 和数组，对象的话记得在结构体上加上标签不然会反射成结构体变量的名字
+	//注意的一点，也是个坑，需要转换的结构体的变量名首字母要大写
+	if err := json.Unmarshal(incomingMsg, &in); err != nil {
+		return nil, false, &invalidMessageError{err.Error()}
+	}
+
+	if err := checkReqId(in.Id); err != nil {
+		return nil, false, &invalidMessageError{err.Error()}
+	}
+	
+  /*
+  消息订阅被去除，感兴趣的可以自己尝试下
+  */
+  
+   //获取方法中的对象名字和方法
+	elems := strings.Split(in.Method, serviceMethodSeparator)
+	if len(elems) != 2 {
+		return nil, false, &methodNotFoundError{in.Method, ""}
+	}
+	// 普通的RPC请求方法解析呗
+	if len(in.Payload) == 0 {
+		return []rpcRequest{{service: elems[0], method: elems[1], id: &in.Id}}, false, nil
+	}
+	return []rpcRequest{{service: elems[0], method: elems[1], id: &in.Id, params: in.Payload}}, false, nil
+}
+//解析每个请求的参数，参数是2个哦，第一个参数的类型，参数的类型怎么来的呢？之后分析server端的时候会详细介绍，就是我们在最开始的时候会把所有需要注册服务的每个方法进行反射保存在map里，然后第二参数是需要解析的参数也就是rpcRequest中的playload
+func (c *jsonCodec) ParseRequestArguments(argTypes []reflect.Type, params interface{}) ([]reflect.Value, Error) {
+	//类型判断，确保不传错
+	if args, ok := params.(json.RawMessage); !ok {
+		return nil, &invalidParamsError{"Invalid params supplied"}
+	} else {
+		return parsePositionalArguments(args, argTypes)
+	}
+}
+
+//解析参数的真正实现方法
+func parsePositionalArguments(rawArgs json.RawMessage, types []reflect.Type) ([]reflect.Value, Error) {
+    //创建一个新的decoer，是直接读byte的，说过了 rawMessage 其实就是对[]byte的进一步封装
+	dec := json.NewDecoder(bytes.NewReader(rawArgs))
+   //获取第一个需要解析的符号，如果第一个符号不为"["那就拜拜，因为根据jsonrpc格式，参数是数组的形式哦
+	if tok, _ := dec.Token(); tok != json.Delim('[') {
+		return nil, &invalidParamsError{"non-array args"}
+	}
+   
+	args := make([]reflect.Value, 0, len(types))
+	
+	//dec.More(),查看json对象或者json数组里面还有没有未解析的，所以这里直接一个大大的for做循环，这个就有点像数据结构中的迭代器
+	for i := 0; dec.More(); i++ {
+		if i >= len(types) {
+			return nil, &invalidParamsError{fmt.Sprintf("too many arguments, want at most %d", len(types))}
+		}
+		argval := reflect.New(types[i])
+		if err := dec.Decode(argval.Interface()); err != nil {
+			return nil, &invalidParamsError{fmt.Sprintf("invalid argument %d: %v", i, err)}
+		}
+		if argval.IsNil() && types[i].Kind() != reflect.Ptr {
+			return nil, &invalidParamsError{fmt.Sprintf("missing value for required argument %d", i)}
+		}
+		args = append(args, argval.Elem())
+	}
+   //检查最后的结束符
+	if _, err := dec.Token(); err != nil {
+		return nil, &invalidParamsError{err.Error()}
+	}
+	
+	for i := len(args); i < len(types); i++ {
+		if types[i].Kind() != reflect.Ptr {
+			return nil, &invalidParamsError{fmt.Sprintf("missing value for required argument %d", i)}
+		}
+		args = append(args, reflect.Zero(types[i]))
+	}
+	return args, nil
+}
+
+// 自己敲吧没啥好解释的了
+func (c *jsonCodec) CreateResponse(id interface{}, reply interface{}) interface{} {
+	if isHexNum(reflect.TypeOf(reply)) {
+		return &jsonSuccessResponse{Version: jsonrpcVersion, Id: id, Result: fmt.Sprintf(`%#x`, reply)}
+	}
+	return &jsonSuccessResponse{Version: jsonrpcVersion, Id: id, Result: reply}
+}
+
+// 自己敲吧没啥好解释的了
+func (c *jsonCodec) CreateErrorResponse(id interface{}, err Error) interface{} {
+	return &jsonErrResponse{Version: jsonrpcVersion, Id: id, Error: jsonError{Code: err.ErrorCode(), Message: err.Error()}}
+}
+
+// 有了读当然也要有写咯
+func (c *jsonCodec) Write(res interface{}) error {
+	c.encMu.Lock()
+	defer c.encMu.Unlock()
+    //往encoder里面扔数据，biu biu biu的扔
+	return c.e.Encode(res)
+}
+
+//等待关闭
+func (c *jsonCodec) Closed() <-chan interface{} {
+	return c.closed
+}
+//判断批量操作实现方法
+func isBatch(msg json.RawMessage) bool {
+   //说白了就是判断第一个有效字符是不是'['
+	for _, c := range msg {
+	
+		if c == 0x20 || c == 0x09 || c == 0x0a || c == 0x0d {
+			continue
+		}
+		return c == '['
+	}
+	return false
+}
+```
+### 总结
+
+第一篇的逻辑还是比较简单，但是仔细看以太坊写的代码发现逻辑虽然简单但是很缜密，也就是简单说，server端会不断监听从coder里面拿东西交给coder去处理解析，然后在coder在把信息往回扔。所以coder其实形成了 client 和 server的一个桥梁。coder也起到穿衣服 脱衣服的一个工作。是不是很爽
+下一张会写Server 最后一张会写Client，最后我们连起来做一个单元测试。
+
+
+
+
+
+
+
+
+   
+   
+
+  [1]: https://github.com/tianyun6655/tianyun6655.github.io/blob/master/img/aa03bd315c6034a863eaac8dc013495409237653.jpg?raw=true "aa03bd315c6034a863eaac8dc013495409237653.jpg"
+  [2]: https://github.com/tianyun6655/tianyun6655.github.io/blob/master/img/sb_talking.jpg?raw=true "sb_talking.jpg"
+  [3]: https://github.com/tianyun6655/tianyun6655.github.io/blob/master/img/console1.jpg?raw=true "console1.jpg"
+  [4]: https://github.com/tianyun6655/tianyun6655.github.io/blob/master/img/localconsole1.jpg?raw=true"localconsole1.jpg"
+  [5]: https://github.com/tianyun6655/tianyun6655.github.io/blob/master/img/rpcstruct.jpg?raw=true"rpcstruct.jpg"
+  [6]: https://github.com/tianyun6655/tianyun6655.github.io/blob/master/img/5e044e4a20a44623d47eb06e9322720e0cf3d728.jpg?raw=true"5e044e4a20a44623d47eb06e9322720e0cf3d728.jpg"
